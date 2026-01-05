@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: defender_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: defender
+      POSTGRES_USER: defender
+      POSTGRES_PASSWORD: defender
+    ports:
+      - "5432:5432"
+    volumes:
+      - defender_pg_data:/var/lib/postgresql/data
+
+volumes:
+  defender_pg_data:
