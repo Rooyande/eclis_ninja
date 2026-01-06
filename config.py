@@ -17,13 +17,20 @@ class Config:
         self.public_base_url = (
             os.getenv("PUBLIC_BASE_URL", "").strip()
             or os.getenv("RENDER_EXTERNAL_URL", "").strip()
-            or os.getenv("WEBHOOK_HOST", "").strip()  # برای سازگاری
+            or os.getenv("WEBHOOK_HOST", "").strip()  # سازگاری با نسخه‌های قبلی
         )
+
         self.webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
         self.port = int(os.getenv("PORT", "10000"))
 
+        # IMPORTANT: bot.py expects cfg.webhook_path
+        # We standardize it with a leading slash.
+        self.webhook_path = f"/webhook/{self.webhook_secret}" if self.webhook_secret else ""
+
         if self.run_mode == "server":
             if not self.public_base_url:
-                raise RuntimeError("PUBLIC_BASE_URL (or RENDER_EXTERNAL_URL/WEBHOOK_HOST) is required in server mode")
+                raise RuntimeError(
+                    "PUBLIC_BASE_URL (or RENDER_EXTERNAL_URL/WEBHOOK_HOST) is required in server mode"
+                )
             if not self.webhook_secret:
                 raise RuntimeError("WEBHOOK_SECRET is required in server mode")
