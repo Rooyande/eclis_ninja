@@ -17,18 +17,8 @@ from telegram.ext import (
     filters,
 )
 
-from defender.db.repo.management import (
-    init_management_schema,
-    set_management_group,
-    get_management_group_owner,
-    add_subgroup,
-    list_subgroups,
-    set_add_member_mode,
-    get_add_member_mode,
-)
-
-
 from config import Config
+
 from defender.db.repo.core import (
     add_global_ban,
     add_protected_chat,
@@ -47,6 +37,16 @@ from defender.db.repo.core import (
     upsert_allowed_member,
 )
 
+from defender.db.repo.management import (
+    init_management_schema,
+    set_management_group,
+    get_management_group_owner,
+    add_subgroup,
+    list_subgroups,
+    set_add_member_mode,
+    get_add_member_mode,
+)
+
 logging.basicConfig(level=logging.INFO)
 
 # ---------------- UX strings ----------------
@@ -59,17 +59,33 @@ USAGE = (
     "/remove_chat <chat_id>\n"
     "/list_members\n"
     "/list_chats\n"
+    "/set_mg <mg_chat_id> <owner_user_id>\n"
     "\n"
-    "دستورهای فارسی (بدون اسلش) در PV:\n"
-    "شروع\n"
-    "راهنما\n"
-    "افزودن عضو <user_id|@username>\n"
-    "حذف عضو <user_id>\n"
-    "آنبن <user_id>\n"
+    "Commands (MG group):\n"
+    "/add_group <subgroup_chat_id>\n"
+    "/confirm_add_group\n"
+    "/list_groups\n"
+    "/addmode <ask|all>\n"
+    "/cancel\n"
+    "\n"
+    "دستورهای فارسی (بدون اسلش):\n"
+    "PV:\n"
+    "شروع | راهنما\n"
+    "افزودن عضو <id|@username>\n"
+    "حذف عضو <id>\n"
+    "آنبن <id>\n"
     "افزودن گروه <chat_id>\n"
     "حذف گروه <chat_id>\n"
     "لیست اعضا\n"
     "لیست گروه‌ها\n"
+    "تنظیم گروه مدیریتی <mg_chat_id> <owner_user_id>\n"
+    "\n"
+    "داخل گروه مدیریتی:\n"
+    "افزودن زیرگروه <subgroup_chat_id>\n"
+    "تایید زیرگروه\n"
+    "لیست زیرگروه‌ها\n"
+    "حالت افزودن ask|all\n"
+    "لغو\n"
 )
 
 # ---------------- anti-raid settings ----------------
@@ -95,6 +111,10 @@ async def admin_guard(cfg: Config, update: Update) -> bool:
     return pv_only(update) and update.effective_user is not None and is_admin(cfg, update.effective_user.id)
 
 
+def is_db_ready(cfg: Config) -> bool:
+    return bool(cfg.database_url and not cfg.database_url.strip().startswith("<"))
+
+
 # ---------------- join tracking ----------------
 def register_join(chat_id: int) -> int:
     now = time.time()
@@ -108,93 +128,43 @@ def register_join(chat_id: int) -> int:
 
 # ---------------- helpers ----------------
 async def init_db(cfg: Config) -> None:
-    if not cfg.database_url or cfg.database_url.strip().startswith("<"):
+    if not is_db_ready(cfg):
         logging.warning("DATABASE_URL is not set/invalid. DB features disabled.")
         return
-
-     await asyncio.to_thread(init_schema, cfg.database_url)
+    await asyncio.to_thread(init_schema, cfg.database_url)
     await asyncio.to_thread(init_management_schema, cfg.database_url)
-
     logging.info("Database init ok.")
-
 
 
 def normalize_fa(s: str) -> str:
     return (
-        s.replace("ي", "ی")
+        (s or "")
+        .replace("ي", "ی")
         .replace("ك", "ک")
         .replace("\u200c", " ")
         .strip()
     )
 
 
-def parse_fa_command(text: str) -> tuple[str, list[str]] | None:
-    """
-    فارسی بدون اسلش:
-      شروع
-      راهنما
-      افزودن عضو 123 / افزودن عضو @username
-      حذف عضو 123
-      آنبن 123
-      افزودن گروه -100...
-      حذف گروه -100...
-      لیست اعضا
-      لیست گروه‌ها
-    """
-    t = normalize_fa(text)
-
-    fa_map = {
-        "شروع": "start",
-        "راهنما": "help",
-        "افزودن عضو": "add_member",
-        "حذف عضو": "remove_member",
-        "آنبن": "unban",
-        "افزودن گروه": "add_chat",
-        "حذف گروه": "remove_chat",
-        "لیست اعضا": "list_members",
-        "لیست گروه‌ها": "list_chats",
-    }
-
-    # exact commands (no args)
-    if t in ("شروع", "راهنما", "لیست اعضا", "لیست گروه‌ها"):
-        return fa_map[t], []
-
-    # commands with args
-    for phrase, key in fa_map.items():
-        if t.startswith(phrase + " "):
-            rest = t[len(phrase):].strip()
-            args = rest.split() if rest else []
-            return key, args
-
-    return None
-
-
 async def resolve_user_ref(
-    cfg: Config,
     context: ContextTypes.DEFAULT_TYPE,
-    ref: str
+    ref: str,
 ) -> tuple[int, str | None, str | None, str | None]:
-    """Resolve a user reference to numeric user_id.
-
-    Supports:
-      - numeric user_id
-      - @username  (requires the user to have a public username)
-    Returns: (user_id, username, first_name, last_name)
-    """
-    ref = ref.strip()
+    ref = (ref or "").strip()
     if ref.isdigit():
         return int(ref), None, None, None
 
     if ref.startswith("@"):
         chat = await context.bot.get_chat(ref)
-        user = chat
-        return int(user.id), getattr(user, "username", None), getattr(user, "first_name", None), getattr(user, "last_name", None)
+        return int(chat.id), getattr(chat, "username", None), getattr(chat, "first_name", None), getattr(chat, "last_name", None)
 
     raise ValueError("bad_ref")
 
 
 async def enforce_user(cfg: Config, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, reason: str):
     if user_id == context.bot.id:
+        return
+    if not is_db_ready(cfg):
         return
 
     await asyncio.to_thread(mark_seen, cfg.database_url, chat_id, user_id)
@@ -226,7 +196,7 @@ async def enforce_user(cfg: Config, context: ContextTypes.DEFAULT_TYPE, chat_id:
         logging.warning(f"enforce failed reason={reason} chat={chat_id} user={user_id} err={e}")
 
 
-# ---------------- commands ----------------
+# ---------------- commands (PV admin) ----------------
 async def cmd_start(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pv_only(update):
         return
@@ -239,23 +209,29 @@ async def cmd_start(cfg: Config, update: Update, context: ContextTypes.DEFAULT_T
 async def cmd_add_member(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
         return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
+        return
     if not context.args or len(context.args) != 1:
         await update.effective_message.reply_text(USAGE)
         return
 
     ref = context.args[0]
     try:
-        user_id, username, first_name, last_name = await resolve_user_ref(cfg, context, ref)
+        user_id, username, first_name, last_name = await resolve_user_ref(context, ref)
     except Exception:
         await update.effective_message.reply_text("ورودی نامعتبر است. مثال: /add_member 123456 یا /add_member @username")
         return
 
     await asyncio.to_thread(upsert_allowed_member, cfg.database_url, user_id, username, first_name, last_name)
-    await update.effective_message.reply_text(f"user {user_id} added. username={('@'+username) if username else 'N/A'}")
+    await update.effective_message.reply_text(f"✅ عضو مجاز شد: {user_id}  {('@'+username) if username else ''}".strip())
 
 
 async def cmd_remove_member(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
+        return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
         return
     if not context.args or len(context.args) != 1 or not context.args[0].isdigit():
         await update.effective_message.reply_text("Usage: /remove_member <user_id>")
@@ -273,11 +249,14 @@ async def cmd_remove_member(cfg: Config, update: Update, context: ContextTypes.D
         except Exception as e:
             logging.warning(f"ban failed user={target} chat={chat_id} err={e}")
 
-    await update.effective_message.reply_text(f"user {target} removed & global banned.")
+    await update.effective_message.reply_text(f"✅ کاربر حذف و گلوبال‌بن شد: {target}")
 
 
 async def cmd_unban(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
+        return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
         return
     if not context.args or len(context.args) != 1 or not context.args[0].isdigit():
         await update.effective_message.reply_text("Usage: /unban <user_id>")
@@ -302,7 +281,7 @@ async def cmd_unban(cfg: Config, update: Update, context: ContextTypes.DEFAULT_T
         _last_notified.pop((chat_id, target), None)
 
     await update.effective_message.reply_text(
-        f"✅ unban done for {target}\n"
+        f"✅ آنبن شد: {target}\n"
         f"unbanned in:\n" + ("\n".join(map(str, ok)) if ok else "none") + (f"\n\nfailed:\n" + "\n".join(map(str, fail)) if fail else "")
     )
 
@@ -310,17 +289,23 @@ async def cmd_unban(cfg: Config, update: Update, context: ContextTypes.DEFAULT_T
 async def cmd_add_chat(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
         return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
+        return
     if not context.args or len(context.args) != 1 or not context.args[0].lstrip("-").isdigit():
         await update.effective_message.reply_text("Usage: /add_chat <chat_id>")
         return
 
     chat_id = int(context.args[0])
     await asyncio.to_thread(add_protected_chat, cfg.database_url, chat_id)
-    await update.effective_message.reply_text(f"chat {chat_id} protected.")
+    await update.effective_message.reply_text(f"✅ گروه محافظت شد: {chat_id}")
 
 
 async def cmd_remove_chat(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
+        return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
         return
     if not context.args or len(context.args) != 1 or not context.args[0].lstrip("-").isdigit():
         await update.effective_message.reply_text("Usage: /remove_chat <chat_id>")
@@ -328,11 +313,14 @@ async def cmd_remove_chat(cfg: Config, update: Update, context: ContextTypes.DEF
 
     chat_id = int(context.args[0])
     await asyncio.to_thread(remove_protected_chat, cfg.database_url, chat_id)
-    await update.effective_message.reply_text(f"chat {chat_id} removed from protection.")
+    await update.effective_message.reply_text(f"✅ از حفاظت خارج شد: {chat_id}")
 
 
 async def cmd_list_members(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
+        return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
         return
 
     members = await asyncio.to_thread(list_allowed_members, cfg.database_url)
@@ -349,6 +337,9 @@ async def cmd_list_members(cfg: Config, update: Update, context: ContextTypes.DE
 async def cmd_list_chats(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_guard(cfg, update):
         return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
+        return
 
     chats = await asyncio.to_thread(list_protected_chats, cfg.database_url)
     if not chats:
@@ -357,12 +348,8 @@ async def cmd_list_chats(cfg: Config, update: Update, context: ContextTypes.DEFA
 
     await update.effective_message.reply_text("لیست گروه‌های محافظت‌شده:\n" + "\n".join(map(str, chats)))
 
-def is_db_ready(cfg: Config) -> bool:
-    return bool(cfg.database_url and not cfg.database_url.strip().startswith("<"))
-
 
 async def cmd_set_mg(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فقط PV و فقط سوپرادمین
     if not await admin_guard(cfg, update):
         return
     if not is_db_ready(cfg):
@@ -384,8 +371,8 @@ async def cmd_set_mg(cfg: Config, update: Update, context: ContextTypes.DEFAULT_
     await update.effective_message.reply_text(f"✅ گروه مدیریتی ثبت شد.\nmg: {mg_chat_id}\nowner: {owner_user_id}")
 
 
+# ---------------- commands (MG group owner) ----------------
 async def mg_owner_guard(cfg: Config, update: Update) -> bool:
-    # فقط داخل گروه و فقط owner
     chat = update.effective_chat
     user = update.effective_user
     if not chat or not user:
@@ -400,7 +387,6 @@ async def mg_owner_guard(cfg: Config, update: Update) -> bool:
 
 
 async def cmd_add_group(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فقط داخل گروه مدیریتی، فقط owner
     if not await mg_owner_guard(cfg, update):
         return
     if not context.args or len(context.args) != 1:
@@ -417,8 +403,8 @@ async def cmd_add_group(cfg: Config, update: Update, context: ContextTypes.DEFAU
 
     await update.effective_message.reply_text(
         f"زیرگروه پیشنهادی:\n{subgroup_chat_id}\n\n"
-        f"تایید: /confirm_add_group\n"
-        f"لغو: /cancel"
+        f"تایید: /confirm_add_group یا «تایید زیرگروه»\n"
+        f"لغو: /cancel یا «لغو»"
     )
 
 
@@ -478,50 +464,129 @@ async def cmd_addmode(cfg: Config, update: Update, context: ContextTypes.DEFAULT
     await update.effective_message.reply_text(f"✅ حالت افزودن تنظیم شد: {mode}")
 
 
+# ---------------- Persian text router (PV + MG) ----------------
+PV_FA_MAP = {
+    "شروع": ("start", []),
+    "راهنما": ("help", []),
+    "لیست اعضا": ("list_members", []),
+    "لیست گروه‌ها": ("list_chats", []),
+}
 
-# ---------------- Persian text router ----------------
-async def on_fa_text_command(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فقط PV و فقط ادمین
-    if not pv_only(update):
-        return
-    if update.effective_user is None or not is_admin(cfg, update.effective_user.id):
-        return
+PV_FA_PREFIX = {
+    "افزودن عضو": "add_member",
+    "حذف عضو": "remove_member",
+    "آنبن": "unban",
+    "افزودن گروه": "add_chat",
+    "حذف گروه": "remove_chat",
+    "تنظیم گروه مدیریتی": "set_mg",
+}
+
+MG_FA_PREFIX = {
+    "افزودن زیرگروه": "add_group",
+    "تایید زیرگروه": "confirm_add_group",
+    "لیست زیرگروه‌ها": "list_groups",
+    "حالت افزودن": "addmode",
+    "لغو": "cancel",
+}
+
+async def on_farsi_text(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if msg is None or msg.text is None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not msg.text or not chat or not user:
         return
 
-    parsed = parse_fa_command(msg.text)
-    if not parsed:
+    t = normalize_fa(msg.text)
+
+    # PV commands (admin only)
+    if chat.type == "private":
+        if not is_admin(cfg, user.id):
+            return
+
+        if t in PV_FA_MAP:
+            key, args = PV_FA_MAP[t]
+        else:
+            key, args = None, []
+            for phrase, cmd in PV_FA_PREFIX.items():
+                if t.startswith(phrase + " "):
+                    rest = t[len(phrase):].strip()
+                    args = rest.split() if rest else []
+                    key = cmd
+                    break
+
+        if not key:
+            return
+
+        old_args = getattr(context, "args", None)
+        context.args = args
+        try:
+            if key in ("start", "help"):
+                await cmd_start(cfg, update, context)
+            elif key == "add_member":
+                await cmd_add_member(cfg, update, context)
+            elif key == "remove_member":
+                await cmd_remove_member(cfg, update, context)
+            elif key == "unban":
+                await cmd_unban(cfg, update, context)
+            elif key == "add_chat":
+                await cmd_add_chat(cfg, update, context)
+            elif key == "remove_chat":
+                await cmd_remove_chat(cfg, update, context)
+            elif key == "list_members":
+                await cmd_list_members(cfg, update, context)
+            elif key == "list_chats":
+                await cmd_list_chats(cfg, update, context)
+            elif key == "set_mg":
+                await cmd_set_mg(cfg, update, context)
+        finally:
+            context.args = old_args
         return
 
-    key, args = parsed
+    # MG group commands (owner only)
+    if chat.type in ("group", "supergroup"):
+        # only owner can use mg commands
+        if not is_db_ready(cfg):
+            return
+        owner = await asyncio.to_thread(get_management_group_owner, cfg.database_url, chat.id)
+        if owner != user.id:
+            return
 
-    # emulate context.args
-    old_args = getattr(context, "args", None)
-    context.args = args
-    try:
-        if key in ("start", "help"):
-            await cmd_start(cfg, update, context)
-        elif key == "add_member":
-            await cmd_add_member(cfg, update, context)
-        elif key == "remove_member":
-            await cmd_remove_member(cfg, update, context)
-        elif key == "unban":
-            await cmd_unban(cfg, update, context)
-        elif key == "add_chat":
-            await cmd_add_chat(cfg, update, context)
-        elif key == "remove_chat":
-            await cmd_remove_chat(cfg, update, context)
-        elif key == "list_members":
-            await cmd_list_members(cfg, update, context)
-        elif key == "list_chats":
-            await cmd_list_chats(cfg, update, context)
-    finally:
-        context.args = old_args
+        key, args = None, []
+        for phrase, cmd in MG_FA_PREFIX.items():
+            if t == phrase:
+                key = cmd
+                args = []
+                break
+            if t.startswith(phrase + " "):
+                rest = t[len(phrase):].strip()
+                args = rest.split() if rest else []
+                key = cmd
+                break
+
+        if not key:
+            return
+
+        old_args = getattr(context, "args", None)
+        context.args = args
+        try:
+            if key == "add_group":
+                await cmd_add_group(cfg, update, context)
+            elif key == "confirm_add_group":
+                await cmd_confirm_add_group(cfg, update, context)
+            elif key == "list_groups":
+                await cmd_list_groups(cfg, update, context)
+            elif key == "addmode":
+                await cmd_addmode(cfg, update, context)
+            elif key == "cancel":
+                await cmd_cancel(cfg, update, context)
+        finally:
+            context.args = old_args
 
 
 # ---------------- event handlers ----------------
 async def on_new_members_message(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_db_ready(cfg):
+        return
     chat = update.effective_chat
     msg = update.effective_message
     if not chat or not msg:
@@ -548,6 +613,8 @@ async def on_new_members_message(cfg: Config, update: Update, context: ContextTy
 
 
 async def on_chat_member(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_db_ready(cfg):
+        return
     chat = update.effective_chat
     if not chat:
         return
@@ -579,23 +646,26 @@ async def on_chat_member(cfg: Config, update: Update, context: ContextTypes.DEFA
 
 
 async def on_any_message_seen(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_db_ready(cfg):
+        return
     chat = update.effective_chat
     user = update.effective_user
     if not chat or not user:
         return
 
-    # مهم: PV را کامل رد کن (برای تست فرمان‌های فارسی و جلوگیری از DB-call)
     if chat.type == "private":
         return
 
-    # اگر DB نداریم/خراب است، این بخش را غیرفعال کن
-    if not cfg.database_url or cfg.database_url.strip().startswith("<"):
+    chat_id = chat.id
+    if not await asyncio.to_thread(is_protected_chat, cfg.database_url, chat_id):
         return
+
+    await asyncio.to_thread(mark_seen, cfg.database_url, chat_id, user.id)
 
 
 # ---------------- periodic enforcement ----------------
 async def periodic_enforce(cfg: Config, context: ContextTypes.DEFAULT_TYPE):
-    if not cfg.database_url or cfg.database_url.strip().startswith("<"):
+    if not is_db_ready(cfg):
         return
     bot = context.bot
     chats = await asyncio.to_thread(list_protected_chats, cfg.database_url)
@@ -611,7 +681,9 @@ async def periodic_enforce(cfg: Config, context: ContextTypes.DEFAULT_TYPE):
                 if user_id in admin_ids:
                     continue
 
-                should_ban = await asyncio.to_thread(is_globally_banned, cfg.database_url, user_id) or (not await asyncio.to_thread(is_allowed_member, cfg.database_url, user_id))
+                should_ban = await asyncio.to_thread(is_globally_banned, cfg.database_url, user_id) or (
+                    not await asyncio.to_thread(is_allowed_member, cfg.database_url, user_id)
+                )
                 if not should_ban:
                     continue
 
@@ -642,61 +714,16 @@ async def periodic_enforce(cfg: Config, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"periodic scan failed chat={chat_id} err={e}")
 
-FA_MAP = {
-    "تنظیم گروه مدیریتی": "set_mg",
-    "افزودن زیرگروه": "add_group",
-    "تایید زیرگروه": "confirm_add_group",
-    "لیست زیرگروه‌ها": "list_groups",
-    "حالت افزودن": "addmode",
-    "لغو": "cancel",
-}
-
-def parse_fa(text: str):
-    text = (text or "").strip()
-    for k, cmd in FA_MAP.items():
-        if text.startswith(k):
-            rest = text[len(k):].strip()
-            args = rest.split() if rest else []
-            return cmd, args
-    return None, []
-
-async def on_farsi_command(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message or not update.effective_message.text:
-        return
-
-    cmd, args = parse_fa(update.effective_message.text)
-    if not cmd:
-        return
-
-    # args را مثل CommandHandler داخل context.args می‌گذاریم
-    context.args = args
-
-    if cmd == "set_mg":
-        await cmd_set_mg(cfg, update, context)
-    elif cmd == "add_group":
-        await cmd_add_group(cfg, update, context)
-    elif cmd == "confirm_add_group":
-        await cmd_confirm_add_group(cfg, update, context)
-    elif cmd == "list_groups":
-        await cmd_list_groups(cfg, update, context)
-    elif cmd == "addmode":
-        await cmd_addmode(cfg, update, context)
-    elif cmd == "cancel":
-        await cmd_cancel(cfg, update, context)
-
-
-
 
 # ---------------- app build ----------------
 def build_application(cfg: Config) -> Application:
     app = Application.builder().token(cfg.bot_token).build()
 
-    # Persian text commands (PV, admin only) - should be early
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: on_fa_text_command(cfg, u, c)), group=0)
+    # Persian text router (PV + MG)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: on_farsi_text(cfg, u, c)), group=0)
 
-    # commands (PV)
+    # PV commands
     app.add_handler(CommandHandler("start", lambda u, c: cmd_start(cfg, u, c)))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: on_farsi_command(cfg, u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: cmd_start(cfg, u, c)))
     app.add_handler(CommandHandler("add_member", lambda u, c: cmd_add_member(cfg, u, c)))
     app.add_handler(CommandHandler("remove_member", lambda u, c: cmd_remove_member(cfg, u, c)))
@@ -705,13 +732,14 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: on_
     app.add_handler(CommandHandler("remove_chat", lambda u, c: cmd_remove_chat(cfg, u, c)))
     app.add_handler(CommandHandler("list_members", lambda u, c: cmd_list_members(cfg, u, c)))
     app.add_handler(CommandHandler("list_chats", lambda u, c: cmd_list_chats(cfg, u, c)))
-app.add_handler(CommandHandler("set_mg", lambda u, c: cmd_set_mg(cfg, u, c)))
-app.add_handler(CommandHandler("add_group", lambda u, c: cmd_add_group(cfg, u, c)))
-app.add_handler(CommandHandler("confirm_add_group", lambda u, c: cmd_confirm_add_group(cfg, u, c)))
-app.add_handler(CommandHandler("list_groups", lambda u, c: cmd_list_groups(cfg, u, c)))
-app.add_handler(CommandHandler("addmode", lambda u, c: cmd_addmode(cfg, u, c)))
-app.add_handler(CommandHandler("cancel", lambda u, c: cmd_cancel(cfg, u, c)))
+    app.add_handler(CommandHandler("set_mg", lambda u, c: cmd_set_mg(cfg, u, c)))
 
+    # MG commands (still via slash)
+    app.add_handler(CommandHandler("add_group", lambda u, c: cmd_add_group(cfg, u, c)))
+    app.add_handler(CommandHandler("confirm_add_group", lambda u, c: cmd_confirm_add_group(cfg, u, c)))
+    app.add_handler(CommandHandler("list_groups", lambda u, c: cmd_list_groups(cfg, u, c)))
+    app.add_handler(CommandHandler("addmode", lambda u, c: cmd_addmode(cfg, u, c)))
+    app.add_handler(CommandHandler("cancel", lambda u, c: cmd_cancel(cfg, u, c)))
 
     # join detection
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, lambda u, c: on_new_members_message(cfg, u, c)))
@@ -735,7 +763,6 @@ app.add_handler(CommandHandler("cancel", lambda u, c: cmd_cancel(cfg, u, c)))
 
 
 def run_local_polling(app: Application) -> None:
-    """Run the bot locally using long polling."""
     logging.info("Starting in LOCAL mode (polling)")
     app.run_polling(drop_pending_updates=True)
 
@@ -790,7 +817,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def run_server_webhook(app: Application, cfg: Config) -> None:
-    """Run the bot on a server using webhook."""
     logging.info("Starting in SERVER mode (webhook)")
 
     loop = asyncio.new_event_loop()
