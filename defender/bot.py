@@ -36,21 +36,23 @@ from defender.db.repo.core import (
     upsert_allowed_member,
 )
 
+import logging
+
 def run_server_webhook(app, cfg):
-    webhook_path = f"webhook/{cfg.webhook_secret}"     # بدون اسلش اول برای PTB
+    # مسیر وبهوک امن
+    webhook_path = f"webhook/{cfg.webhook_secret}"  # بدون / اول برای url_path
     webhook_url = f"{cfg.public_base_url}/{webhook_path}"
 
-    logging.info("Setting webhook to %s", webhook_url)
+    logging.info("Setting webhook: %s", webhook_url)
 
-    # ست کردن وبهوک در تلگرام
-    # drop_pending_updates=True خوب است برای دیپلوی جدید
+    # ست کردن وبهوک
     app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
 
-    # اجرای وب سرور داخلی PTB
+    # اجرای وب سرور
     app.run_webhook(
         listen="0.0.0.0",
         port=cfg.port,
-        url_path=webhook_path,              # همین رشته
+        url_path=webhook_path,
         drop_pending_updates=True,
     )
 
