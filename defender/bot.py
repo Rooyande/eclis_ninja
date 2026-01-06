@@ -17,6 +17,17 @@ from telegram.ext import (
     filters,
 )
 
+from defender.db.repo.management import (
+    init_management_schema,
+    set_management_group,
+    get_management_group_owner,
+    add_subgroup,
+    list_subgroups,
+    set_add_member_mode,
+    get_add_member_mode,
+)
+
+
 from config import Config
 from defender.db.repo.core import (
     add_global_ban,
@@ -100,7 +111,10 @@ async def init_db(cfg: Config) -> None:
     if not cfg.database_url or cfg.database_url.strip().startswith("<"):
         logging.warning("DATABASE_URL is not set/invalid. DB features disabled.")
         return
-    await asyncio.to_thread(init_schema, cfg.database_url)
+
+     await asyncio.to_thread(init_schema, cfg.database_url)
+    await asyncio.to_thread(init_management_schema, cfg.database_url)
+
     logging.info("Database init ok.")
 
 
@@ -343,6 +357,127 @@ async def cmd_list_chats(cfg: Config, update: Update, context: ContextTypes.DEFA
 
     await update.effective_message.reply_text("لیست گروه‌های محافظت‌شده:\n" + "\n".join(map(str, chats)))
 
+def is_db_ready(cfg: Config) -> bool:
+    return bool(cfg.database_url and not cfg.database_url.strip().startswith("<"))
+
+
+async def cmd_set_mg(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # فقط PV و فقط سوپرادمین
+    if not await admin_guard(cfg, update):
+        return
+    if not is_db_ready(cfg):
+        await update.effective_message.reply_text("DATABASE_URL تنظیم نیست؛ اول دیتابیس را درست کن.")
+        return
+    if not context.args or len(context.args) != 2:
+        await update.effective_message.reply_text("Usage: /set_mg <mg_chat_id> <owner_user_id>")
+        return
+
+    mg_raw, owner_raw = context.args[0], context.args[1]
+    if not mg_raw.lstrip("-").isdigit() or not owner_raw.isdigit():
+        await update.effective_message.reply_text("فرمت عددی اشتباه است.")
+        return
+
+    mg_chat_id = int(mg_raw)
+    owner_user_id = int(owner_raw)
+
+    await asyncio.to_thread(set_management_group, cfg.database_url, mg_chat_id, owner_user_id)
+    await update.effective_message.reply_text(f"✅ گروه مدیریتی ثبت شد.\nmg: {mg_chat_id}\nowner: {owner_user_id}")
+
+
+async def mg_owner_guard(cfg: Config, update: Update) -> bool:
+    # فقط داخل گروه و فقط owner
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return False
+    if chat.type not in ("group", "supergroup"):
+        return False
+    if not is_db_ready(cfg):
+        return False
+
+    owner = await asyncio.to_thread(get_management_group_owner, cfg.database_url, chat.id)
+    return owner == user.id
+
+
+async def cmd_add_group(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # فقط داخل گروه مدیریتی، فقط owner
+    if not await mg_owner_guard(cfg, update):
+        return
+    if not context.args or len(context.args) != 1:
+        await update.effective_message.reply_text("Usage: /add_group <subgroup_chat_id>")
+        return
+
+    sub_raw = context.args[0]
+    if not sub_raw.lstrip("-").isdigit():
+        await update.effective_message.reply_text("آیدی زیرگروه باید عددی باشد (مثلاً -100...).")
+        return
+
+    subgroup_chat_id = int(sub_raw)
+    context.chat_data["pending_add_group"] = subgroup_chat_id
+
+    await update.effective_message.reply_text(
+        f"زیرگروه پیشنهادی:\n{subgroup_chat_id}\n\n"
+        f"تایید: /confirm_add_group\n"
+        f"لغو: /cancel"
+    )
+
+
+async def cmd_confirm_add_group(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await mg_owner_guard(cfg, update):
+        return
+
+    pending = context.chat_data.get("pending_add_group")
+    if not pending:
+        await update.effective_message.reply_text("چیزی برای تایید وجود ندارد.")
+        return
+
+    mg_chat_id = update.effective_chat.id
+    subgroup_chat_id = int(pending)
+
+    await asyncio.to_thread(add_subgroup, cfg.database_url, mg_chat_id, subgroup_chat_id)
+    context.chat_data.pop("pending_add_group", None)
+
+    await update.effective_message.reply_text(f"✅ زیرگروه ثبت شد: {subgroup_chat_id}")
+
+
+async def cmd_cancel(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.chat_data.pop("pending_add_group", None)
+    if update.effective_message:
+        await update.effective_message.reply_text("لغو شد.")
+
+
+async def cmd_list_groups(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await mg_owner_guard(cfg, update):
+        return
+
+    mg_chat_id = update.effective_chat.id
+    groups = await asyncio.to_thread(list_subgroups, cfg.database_url, mg_chat_id)
+
+    if not groups:
+        await update.effective_message.reply_text("هیچ زیرگروهی ثبت نشده.")
+        return
+
+    await update.effective_message.reply_text("زیرگروه‌ها:\n" + "\n".join(map(str, groups)))
+
+
+async def cmd_addmode(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await mg_owner_guard(cfg, update):
+        return
+
+    if not context.args or len(context.args) != 1:
+        await update.effective_message.reply_text("Usage: /addmode <ask|all>")
+        return
+
+    mode = context.args[0].strip().lower()
+    if mode not in ("ask", "all"):
+        await update.effective_message.reply_text("فقط ask یا all مجاز است.")
+        return
+
+    mg_chat_id = update.effective_chat.id
+    await asyncio.to_thread(set_add_member_mode, cfg.database_url, mg_chat_id, mode)
+    await update.effective_message.reply_text(f"✅ حالت افزودن تنظیم شد: {mode}")
+
+
 
 # ---------------- Persian text router ----------------
 async def on_fa_text_command(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -507,6 +642,50 @@ async def periodic_enforce(cfg: Config, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"periodic scan failed chat={chat_id} err={e}")
 
+FA_MAP = {
+    "تنظیم گروه مدیریتی": "set_mg",
+    "افزودن زیرگروه": "add_group",
+    "تایید زیرگروه": "confirm_add_group",
+    "لیست زیرگروه‌ها": "list_groups",
+    "حالت افزودن": "addmode",
+    "لغو": "cancel",
+}
+
+def parse_fa(text: str):
+    text = (text or "").strip()
+    for k, cmd in FA_MAP.items():
+        if text.startswith(k):
+            rest = text[len(k):].strip()
+            args = rest.split() if rest else []
+            return cmd, args
+    return None, []
+
+async def on_farsi_command(cfg: Config, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_message or not update.effective_message.text:
+        return
+
+    cmd, args = parse_fa(update.effective_message.text)
+    if not cmd:
+        return
+
+    # args را مثل CommandHandler داخل context.args می‌گذاریم
+    context.args = args
+
+    if cmd == "set_mg":
+        await cmd_set_mg(cfg, update, context)
+    elif cmd == "add_group":
+        await cmd_add_group(cfg, update, context)
+    elif cmd == "confirm_add_group":
+        await cmd_confirm_add_group(cfg, update, context)
+    elif cmd == "list_groups":
+        await cmd_list_groups(cfg, update, context)
+    elif cmd == "addmode":
+        await cmd_addmode(cfg, update, context)
+    elif cmd == "cancel":
+        await cmd_cancel(cfg, update, context)
+
+
+
 
 # ---------------- app build ----------------
 def build_application(cfg: Config) -> Application:
@@ -517,6 +696,7 @@ def build_application(cfg: Config) -> Application:
 
     # commands (PV)
     app.add_handler(CommandHandler("start", lambda u, c: cmd_start(cfg, u, c)))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: on_farsi_command(cfg, u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: cmd_start(cfg, u, c)))
     app.add_handler(CommandHandler("add_member", lambda u, c: cmd_add_member(cfg, u, c)))
     app.add_handler(CommandHandler("remove_member", lambda u, c: cmd_remove_member(cfg, u, c)))
@@ -525,6 +705,13 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("remove_chat", lambda u, c: cmd_remove_chat(cfg, u, c)))
     app.add_handler(CommandHandler("list_members", lambda u, c: cmd_list_members(cfg, u, c)))
     app.add_handler(CommandHandler("list_chats", lambda u, c: cmd_list_chats(cfg, u, c)))
+app.add_handler(CommandHandler("set_mg", lambda u, c: cmd_set_mg(cfg, u, c)))
+app.add_handler(CommandHandler("add_group", lambda u, c: cmd_add_group(cfg, u, c)))
+app.add_handler(CommandHandler("confirm_add_group", lambda u, c: cmd_confirm_add_group(cfg, u, c)))
+app.add_handler(CommandHandler("list_groups", lambda u, c: cmd_list_groups(cfg, u, c)))
+app.add_handler(CommandHandler("addmode", lambda u, c: cmd_addmode(cfg, u, c)))
+app.add_handler(CommandHandler("cancel", lambda u, c: cmd_cancel(cfg, u, c)))
+
 
     # join detection
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, lambda u, c: on_new_members_message(cfg, u, c)))
