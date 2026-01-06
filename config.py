@@ -1,40 +1,41 @@
 import os
 
 
+# config.py
+import os
+
 class Config:
-    """Runtime configuration loaded from environment variables.
+    def __init__(self):
+        self.run_mode = os.getenv("RUN_MODE", "local").strip().lower()
 
-    RUN_MODE:
-      - local  : long polling (best for Windows development)
-      - server : webhook + minimal HTTP server
-
-    Notes:
-      - In local mode, WEBHOOK_HOST is NOT required.
-      - In server mode, WEBHOOK_HOST is required.
-    """
-
-    def __init__(self) -> None:
-        self.bot_token: str = os.getenv("BOT_TOKEN", "").strip()
-        self.database_url: str = os.getenv("DATABASE_URL", "").strip()
-
-        self.run_mode: str = os.getenv("RUN_MODE", "local").strip().lower()
-        if self.run_mode not in ("local", "server"):
-            raise RuntimeError("RUN_MODE must be 'local' or 'server'")
-
-        # Comma-separated admin user IDs
-        admins_env = os.getenv("ADMINS", "").strip()
-        self.admin_ids = {int(x) for x in admins_env.split(",") if x.strip().isdigit()}
-
-        # Server-mode only
-        self.port: int = int(os.getenv("PORT", "10000"))
-        self.webhook_host: str = os.getenv("WEBHOOK_HOST", "").strip()  # e.g. https://your-app.onrender.com
-
+        self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         if not self.bot_token:
             raise RuntimeError("BOT_TOKEN is not set")
-        if not self.database_url:
-            raise RuntimeError("DATABASE_URL is not set")
-        if self.run_mode == "server" and not self.webhook_host:
-            raise RuntimeError("WEBHOOK_HOST is required in server mode")
+
+        admins_raw = os.getenv("ADMINS", "").strip()
+        self.admin_ids = {int(x.strip()) for x in admins_raw.split(",") if x.strip().isdigit()}
+
+        self.database_url = os.getenv("DATABASE_URL", "").strip()
+
+        # Server/Webhook settings
+        self.public_base_url = (
+            os.getenv("PUBLIC_BASE_URL", "").strip()
+            or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+            or os.getenv("WEBHOOK_HOST", "").strip()
+        )
+        self.webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
+
+        # Render sets PORT automatically for web services
+        self.port = int(os.getenv("PORT", "10000"))
+
+        if self.run_mode == "server":
+            if not self.public_base_url:
+                raise RuntimeError(
+                    "PUBLIC_BASE_URL (or RENDER_EXTERNAL_URL/WEBHOOK_HOST) is required in server mode"
+                )
+            if not self.webhook_secret:
+                raise RuntimeError("WEBHOOK_SECRET is required in server mode")
+
 
     @property
     def webhook_path(self) -> str:

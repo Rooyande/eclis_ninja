@@ -1,13 +1,6 @@
 import logging
 import sys
-import asyncio
 
-# Fix for Python 3.14+ where there's no default current event loop in MainThread
-if sys.platform.startswith("win"):
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
 
 try:
     asyncio.get_event_loop()
