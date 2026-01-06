@@ -2,13 +2,6 @@ import logging
 import sys
 
 
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-
-
 from config import Config
 from defender.bot import build_application, run_local_polling, run_server_webhook
 from dotenv import load_dotenv
