@@ -71,15 +71,6 @@ def get_management_group_owner(database_url: str, mg_chat_id: int) -> Optional[i
     return with_conn(database_url, _run)
 
 
-def list_management_groups(database_url: str) -> List[Tuple[int, int]]:
-    def _run(conn):
-        cur = conn.cursor()
-        cur.execute("SELECT mg_chat_id, owner_user_id FROM management_groups ORDER BY created_at DESC")
-        return [(int(a), int(b)) for (a, b) in cur.fetchall()]
-
-    return with_conn(database_url, _run)
-
-
 def add_subgroup(database_url: str, mg_chat_id: int, subgroup_chat_id: int) -> None:
     def _run(conn):
         cur = conn.cursor()
